@@ -63,7 +63,7 @@ app.post('/signin', (req, res) => {
   if (!email || !password) {
     return res.status(400).json({ message: 'Email and password are required.' });
   }
-  const query = `SELECT password FROM customers WHERE email = ?`;
+  const query = `SELECT * FROM customers WHERE email = ?`;
   db.get(query, [email], (err, row) => {
     if (err) {
       console.error(err);
@@ -73,7 +73,9 @@ app.post('/signin', (req, res) => {
       return res.status(404).json({ message: 'Customer not found.' });
     }
     if (row.password === password) {
-      return res.status(200).json({ message: 'Sign in successful.' });
+      // Remove password before sending data
+      const { password, ...customerData } = row;
+      return res.status(200).json({ message: 'Sign in successful.', customer: customerData });
     } else {
       return res.status(401).json({ message: 'Incorrect password.' });
     }

@@ -1,28 +1,42 @@
-require('dotenv').config();
 const express = require('express');
 const bodyParser = require('body-parser');
-const mysql = require('mysql2');
+const sqlite3 = require('sqlite3').verbose();
+const path = require('path');
 
 const app = express();
 app.use(bodyParser.json());
 
-// MySQL connection
-const db = mysql.createConnection({
-  host: process.env.DB_HOST,
-  user: process.env.DB_USER,
-  password: process.env.DB_PASSWORD,
-  database: process.env.DB_NAME
-});
-
-db.connect((err) => {
+// SQLite connection
+const dbPath = path.resolve(__dirname, 'customerdb.sqlite');
+const db = new sqlite3.Database(dbPath, (err) => {
   if (err) {
-    console.error('Database connection failed:', err.stack);
+    console.error('Database connection failed:', err.message);
     return;
   }
-  console.log('Connected to MySQL database.');
+  console.log('Connected to SQLite database.');
 });
 
-// Placeholder for routes
+// Create table if not exists
+const createTableQuery = `CREATE TABLE IF NOT EXISTS customers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT NOT NULL UNIQUE,
+    password TEXT NOT NULL,
+    name TEXT NOT NULL,
+    nationality TEXT NOT NULL,
+    currently_in_egypt BOOLEAN NOT NULL,
+    date_of_arrival TEXT,
+    date_of_leaving TEXT,
+    currently_in_risk BOOLEAN NOT NULL
+)`;
+db.run(createTableQuery, (err) => {
+  if (err) {
+    console.error('Failed to create table:', err.message);
+  }
+});
+
+app.get('/', (req, res) => {
+  res.send('Customer API is running!');
+});
 
 // Signup endpoint
 app.post('/signup', (req, res) => {
@@ -31,13 +45,13 @@ app.post('/signup', (req, res) => {
     return res.status(400).json({ message: 'Missing required fields.' });
   }
   const query = `INSERT INTO customers (email, password, name, nationality, currently_in_egypt, date_of_arrival, date_of_leaving, currently_in_risk) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`;
-  db.query(query, [email, password, name, nationality, currently_in_egypt, date_of_arrival || null, date_of_leaving || null, currently_in_risk], (err, result) => {
+  db.run(query, [email, password, name, nationality, currently_in_egypt ? 1 : 0, date_of_arrival || null, date_of_leaving || null, currently_in_risk ? 1 : 0], function(err) {
     if (err) {
-      if (err.code === 'ER_DUP_ENTRY') {
+      if (err.message.includes('UNIQUE constraint failed')) {
         return res.status(409).json({ message: 'Email already exists.' });
       }
       console.error(err);
-      return res.status(500).json({ message: 'Database error', error: err });
+      return res.status(500).json({ message: 'Database error', error: err.message });
     }
     res.status(201).json({ message: 'Customer created successfully.' });
   });
@@ -50,23 +64,20 @@ app.post('/signin', (req, res) => {
     return res.status(400).json({ message: 'Email and password are required.' });
   }
   const query = `SELECT password FROM customers WHERE email = ?`;
-  db.query(query, [email], (err, results) => {
+  db.get(query, [email], (err, row) => {
     if (err) {
-      return res.status(500).json({ message: 'Database error', error: err });
+      console.error(err);
+      return res.status(500).json({ message: 'Database error', error: err.message });
     }
-    if (results.length === 0) {
+    if (!row) {
       return res.status(404).json({ message: 'Customer not found.' });
     }
-    if (results[0].password === password) {
+    if (row.password === password) {
       return res.status(200).json({ message: 'Sign in successful.' });
     } else {
       return res.status(401).json({ message: 'Incorrect password.' });
     }
   });
-});
-
-app.get('/', (req, res) => {
-  res.send('Customer API is running!');
 });
 
 const PORT = process.env.PORT || 3000;

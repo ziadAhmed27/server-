@@ -36,6 +36,7 @@ app.post('/signup', (req, res) => {
       if (err.code === 'ER_DUP_ENTRY') {
         return res.status(409).json({ message: 'Email already exists.' });
       }
+      console.error(err);
       return res.status(500).json({ message: 'Database error', error: err });
     }
     res.status(201).json({ message: 'Customer created successfully.' });

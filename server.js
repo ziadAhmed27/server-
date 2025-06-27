@@ -9,7 +9,7 @@ const app = express();
 app.use(bodyParser.json());
 
 // Create uploads directory if it doesn't exist
-const uploadsDir = path.join(__dirname, 'uploads');
+const uploadsDir = path.join(process.cwd(), 'uploads');
 if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
 }
@@ -134,7 +134,12 @@ app.post('/signin', (req, res) => {
 
 // Upload photo endpoint
 app.post('/upload-photo', upload.single('photo'), (req, res) => {
+  console.log('Upload request received');
+  console.log('Request body:', req.body);
+  console.log('Request file:', req.file);
+  
   if (!req.file) {
+    console.log('No file uploaded');
     return res.status(400).json({ message: 'No photo uploaded.' });
   }
 
@@ -143,12 +148,15 @@ app.post('/upload-photo', upload.single('photo'), (req, res) => {
   const originalName = req.file.originalname;
   const filePath = req.file.path;
 
+  console.log('File details:', { filename, originalName, filePath, customer_id, description });
+
   const query = `INSERT INTO photos (filename, original_name, file_path, customer_id, description) VALUES (?, ?, ?, ?, ?)`;
   db.run(query, [filename, originalName, filePath, customer_id || null, description || null], function(err) {
     if (err) {
-      console.error(err);
+      console.error('Database error:', err);
       return res.status(500).json({ message: 'Database error', error: err.message });
     }
+    console.log('Photo saved to database with ID:', this.lastID);
     res.status(201).json({ 
       message: 'Photo uploaded successfully.',
       photo: {
@@ -238,6 +246,18 @@ app.delete('/photos/:id', (req, res) => {
       res.json({ message: 'Photo deleted successfully.' });
     });
   });
+});
+
+// Error handling middleware for multer
+app.use((error, req, res, next) => {
+  if (error instanceof multer.MulterError) {
+    console.error('Multer error:', error);
+    return res.status(400).json({ message: 'File upload error', error: error.message });
+  } else if (error) {
+    console.error('Upload error:', error);
+    return res.status(400).json({ message: 'Upload error', error: error.message });
+  }
+  next();
 });
 
 const PORT = process.env.PORT || 3000;

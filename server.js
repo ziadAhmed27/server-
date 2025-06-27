@@ -2,9 +2,43 @@ const express = require('express');
 const bodyParser = require('body-parser');
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
+const fs = require('fs');
+const multer = require('multer');
 
 const app = express();
 app.use(bodyParser.json());
+
+// Create uploads directory if it doesn't exist
+const uploadsDir = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true });
+}
+
+// Configure multer for file uploads
+const storage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    cb(null, uploadsDir);
+  },
+  filename: function (req, file, cb) {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname));
+  }
+});
+
+const upload = multer({ 
+  storage: storage,
+  limits: {
+    fileSize: 10 * 1024 * 1024 // 10MB limit
+  },
+  fileFilter: function (req, file, cb) {
+    // Accept only image files
+    if (file.mimetype.startsWith('image/')) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only image files are allowed!'), false);
+    }
+  }
+});
 
 // SQLite connection
 const dbPath = path.resolve(__dirname, 'customerdb.sqlite');
@@ -16,8 +50,9 @@ const db = new sqlite3.Database(dbPath, (err) => {
   console.log('Connected to SQLite database.');
 });
 
-// Create table if not exists
-const createTableQuery = `CREATE TABLE IF NOT EXISTS customers (
+// Create tables if not exists
+const createTablesQuery = `
+  CREATE TABLE IF NOT EXISTS customers (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     email TEXT NOT NULL UNIQUE,
     password TEXT NOT NULL,
@@ -27,10 +62,25 @@ const createTableQuery = `CREATE TABLE IF NOT EXISTS customers (
     date_of_arrival TEXT,
     date_of_leaving TEXT,
     currently_in_risk BOOLEAN NOT NULL
-)`;
-db.run(createTableQuery, (err) => {
+  );
+
+  CREATE TABLE IF NOT EXISTS photos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    filename TEXT NOT NULL,
+    original_name TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    customer_id INTEGER,
+    upload_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+    description TEXT,
+    FOREIGN KEY (customer_id) REFERENCES customers (id)
+  );
+`;
+
+db.exec(createTablesQuery, (err) => {
   if (err) {
-    console.error('Failed to create table:', err.message);
+    console.error('Failed to create tables:', err.message);
+  } else {
+    console.log('Tables created successfully.');
   }
 });
 
@@ -79,6 +129,114 @@ app.post('/signin', (req, res) => {
     } else {
       return res.status(401).json({ message: 'Incorrect password.' });
     }
+  });
+});
+
+// Upload photo endpoint
+app.post('/upload-photo', upload.single('photo'), (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ message: 'No photo uploaded.' });
+  }
+
+  const { customer_id, description } = req.body;
+  const filename = req.file.filename;
+  const originalName = req.file.originalname;
+  const filePath = req.file.path;
+
+  const query = `INSERT INTO photos (filename, original_name, file_path, customer_id, description) VALUES (?, ?, ?, ?, ?)`;
+  db.run(query, [filename, originalName, filePath, customer_id || null, description || null], function(err) {
+    if (err) {
+      console.error(err);
+      return res.status(500).json({ message: 'Database error', error: err.message });
+    }
+    res.status(201).json({ 
+      message: 'Photo uploaded successfully.',
+      photo: {
+        id: this.lastID,
+        filename: filename,
+        original_name: originalName,
+        customer_id: customer_id,
+        description: description,
+        upload_time: new Date().toISOString()
+      }
+    });
+  });
+});
+
+// Get photos endpoint
+app.get('/photos', (req, res) => {
+  const { customer_id, limit = 50 } = req.query;
+  let query = `SELECT * FROM photos`;
+  let params = [];
+
+  if (customer_id) {
+    query += ` WHERE customer_id = ?`;
+    params.push(customer_id);
+  }
+
+  query += ` ORDER BY upload_time DESC LIMIT ?`;
+  params.push(parseInt(limit));
+
+  db.all(query, params, (err, rows) => {
+    if (err) {
+      console.error(err);
+      return res.status(500).json({ message: 'Database error', error: err.message });
+    }
+    res.json({ photos: rows });
+  });
+});
+
+// Get photo file endpoint
+app.get('/photos/:id/file', (req, res) => {
+  const photoId = req.params.id;
+  const query = `SELECT file_path, original_name FROM photos WHERE id = ?`;
+  
+  db.get(query, [photoId], (err, row) => {
+    if (err) {
+      console.error(err);
+      return res.status(500).json({ message: 'Database error', error: err.message });
+    }
+    if (!row) {
+      return res.status(404).json({ message: 'Photo not found.' });
+    }
+    
+    // Check if file exists
+    if (!fs.existsSync(row.file_path)) {
+      return res.status(404).json({ message: 'Photo file not found.' });
+    }
+    
+    res.sendFile(row.file_path);
+  });
+});
+
+// Delete photo endpoint
+app.delete('/photos/:id', (req, res) => {
+  const photoId = req.params.id;
+  const query = `SELECT file_path FROM photos WHERE id = ?`;
+  
+  db.get(query, [photoId], (err, row) => {
+    if (err) {
+      console.error(err);
+      return res.status(500).json({ message: 'Database error', error: err.message });
+    }
+    if (!row) {
+      return res.status(404).json({ message: 'Photo not found.' });
+    }
+    
+    // Delete file from filesystem
+    if (fs.existsSync(row.file_path)) {
+      fs.unlinkSync(row.file_path);
+    }
+    
+    // Delete from database
+    const deleteQuery = `DELETE FROM photos WHERE id = ?`;
+    db.run(deleteQuery, [photoId], function(err) {
+      if (err) {
+        console.error(err);
+        return res.status(500).json({ message: 'Database error', error: err.message });
+      }
+      res.json({ message: 'Photo deleted successfully.' });
+    });
   });
 });
 

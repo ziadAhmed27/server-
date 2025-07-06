@@ -480,7 +480,7 @@ app.use((error, req, res, next) => {
 });
 
 const PORT = process.env.PORT || 3000;
-const HOST = '0.0.0.0'; // Bind to all interfaces for Railway
+const HOST = '0.0.0.0';
 
 server.listen(PORT, HOST, () => {
   console.log(`ESP32-CAM Streaming Server running on http://${HOST}:${PORT}`);
@@ -516,15 +516,4 @@ process.on('SIGINT', () => {
       process.exit(0);
     });
   });
-});
-
-// Handle uncaught exceptions
-process.on('uncaughtException', (err) => {
-  console.error('Uncaught Exception:', err);
-  process.exit(1);
-});
-
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
-  process.exit(1);
 }); 

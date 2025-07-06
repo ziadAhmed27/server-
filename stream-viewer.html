@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ESP32-CAM Live Stream Viewer</title>
+    <script src="https://cdn.socket.io/4.7.4/socket.io.min.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f0f0f0;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .controls {
+            margin-bottom: 20px;
+            text-align: center;
+        }
+        .controls input, .controls button {
+            padding: 10px;
+            margin: 5px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+        .controls button {
+            background-color: #007bff;
+            color: white;
+            cursor: pointer;
+            border: none;
+        }
+        .controls button:hover {
+            background-color: #0056b3;
+        }
+        .controls button:disabled {
+            background-color: #6c757d;
+            cursor: not-allowed;
+        }
+        .stream-container {
+            text-align: center;
+            margin: 20px 0;
+        }
+        #streamImage {
+            max-width: 100%;
+            max-height: 600px;
+            border: 2px solid #ddd;
+            border-radius: 5px;
+        }
+        .status {
+            margin: 10px 0;
+            padding: 10px;
+            border-radius: 5px;
+            font-weight: bold;
+        }
+        .status.connected {
+            background-color: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .status.disconnected {
+            background-color: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        .stats {
+            background-color: #f8f9fa;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 20px 0;
+        }
+        .stats h3 {
+            margin-top: 0;
+            color: #495057;
+        }
+        .stats p {
+            margin: 5px 0;
+            color: #6c757d;
+        }
+        .mjpeg-container {
+            text-align: center;
+            margin: 20px 0;
+        }
+        .mjpeg-container img {
+            max-width: 100%;
+            max-height: 600px;
+            border: 2px solid #ddd;
+            border-radius: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>ESP32-CAM Live Stream Viewer</h1>
+        
+        <div class="controls">
+            <input type="text" id="streamName" placeholder="Enter stream name" value="esp32cam">
+            <button onclick="connectWebSocket()">Connect WebSocket</button>
+            <button onclick="disconnectWebSocket()">Disconnect</button>
+            <button onclick="viewMJPEG()">View MJPEG Stream</button>
+            <button onclick="getStats()">Get Stats</button>
+        </div>
+
+        <div id="status" class="status disconnected">
+            Disconnected
+        </div>
+
+        <div class="stream-container">
+            <img id="streamImage" src="data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNjQwIiBoZWlnaHQ9IjQ4MCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTAwJSIgaGVpZ2h0PSIxMDAlIiBmaWxsPSIjZjBmMGYwIi8+PHRleHQgeD0iNTAlIiB5PSI1MCUiIGZvbnQtZmFtaWx5PSJBcmlhbCwgc2Fucy1zZXJpZiIgZm9udC1zaXplPSIyNCIgZmlsbD0iIzk5OSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZHk9Ii4zZW0iPk5vIHN0cmVhbSBjb25uZWN0ZWQ8L3RleHQ+PC9zdmc+" alt="No stream">
+        </div>
+
+        <div class="mjpeg-container" id="mjpegContainer" style="display: none;">
+            <img id="mjpegImage" alt="MJPEG Stream">
+        </div>
+
+        <div class="stats" id="stats" style="display: none;">
+            <h3>Stream Statistics</h3>
+            <div id="statsContent"></div>
+        </div>
+    </div>
+
+    <script>
+        let socket = null;
+        let isConnected = false;
+
+        function updateStatus(message, isConnected) {
+            const statusDiv = document.getElementById('status');
+            statusDiv.textContent = message;
+            statusDiv.className = `status ${isConnected ? 'connected' : 'disconnected'}`;
+        }
+
+        function connectWebSocket() {
+            const streamName = document.getElementById('streamName').value;
+            if (!streamName) {
+                alert('Please enter a stream name');
+                return;
+            }
+
+            // Hide MJPEG container
+            document.getElementById('mjpegContainer').style.display = 'none';
+            document.getElementById('streamImage').style.display = 'block';
+
+            // Connect to Socket.IO
+            socket = io('http://localhost:3000');
+            
+            socket.on('connect', () => {
+                isConnected = true;
+                updateStatus(`Connected to server. Joining stream: ${streamName}`, true);
+                socket.emit('join-stream', streamName);
+            });
+
+            socket.on('new-frame', (data) => {
+                if (data.streamName === streamName) {
+                    const img = document.getElementById('streamImage');
+                    img.src = `data:image/jpeg;base64,${data.frame}`;
+                }
+            });
+
+            socket.on('disconnect', () => {
+                isConnected = false;
+                updateStatus('Disconnected from server', false);
+            });
+
+            socket.on('connect_error', (error) => {
+                console.error('Connection error:', error);
+                updateStatus('Connection failed', false);
+            });
+        }
+
+        function disconnectWebSocket() {
+            if (socket) {
+                socket.disconnect();
+                socket = null;
+            }
+            isConnected = false;
+            updateStatus('Disconnected', false);
+        }
+
+        function viewMJPEG() {
+            const streamName = document.getElementById('streamName').value;
+            if (!streamName) {
+                alert('Please enter a stream name');
+                return;
+            }
+
+            // Disconnect WebSocket if connected
+            if (socket) {
+                socket.disconnect();
+                socket = null;
+            }
+
+            // Hide regular stream image and show MJPEG
+            document.getElementById('streamImage').style.display = 'none';
+            const mjpegContainer = document.getElementById('mjpegContainer');
+            mjpegContainer.style.display = 'block';
+
+            const mjpegImage = document.getElementById('mjpegImage');
+            mjpegImage.src = `http://localhost:3000/streams/${streamName}/mjpeg`;
+
+            updateStatus(`Viewing MJPEG stream: ${streamName}`, true);
+        }
+
+        async function getStats() {
+            const streamName = document.getElementById('streamName').value;
+            if (!streamName) {
+                alert('Please enter a stream name');
+                return;
+            }
+
+            try {
+                const response = await fetch(`http://localhost:3000/streams/${streamName}/stats`);
+                const data = await response.json();
+                
+                if (response.ok) {
+                    const statsDiv = document.getElementById('stats');
+                    const statsContent = document.getElementById('statsContent');
+                    
+                    statsContent.innerHTML = `
+                        <p><strong>Stream Name:</strong> ${data.stream.stream_name}</p>
+                        <p><strong>Active:</strong> ${data.stream.is_active ? 'Yes' : 'No'}</p>
+                        <p><strong>Created:</strong> ${new Date(data.stream.created_at).toLocaleString()}</p>
+                        <p><strong>Last Frame:</strong> ${data.stream.last_frame_time ? new Date(data.stream.last_frame_time).toLocaleString() : 'Never'}</p>
+                        <p><strong>Total Frames:</strong> ${data.stream.frame_count}</p>
+                    `;
+                    
+                    statsDiv.style.display = 'block';
+                } else {
+                    alert('Error: ' + data.message);
+                }
+            } catch (error) {
+                console.error('Error fetching stats:', error);
+                alert('Error fetching stream statistics');
+            }
+        }
+
+        // Auto-connect on page load
+        window.onload = function() {
+            // You can auto-connect here if needed
+            // connectWebSocket();
+        };
+    </script>
+</body>
+</html> 

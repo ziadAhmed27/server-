@@ -4,14 +4,34 @@ const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
+const http = require('http');
+const socketIo = require('socket.io');
+const cors = require('cors');
 
 const app = express();
+const server = http.createServer(app);
+
+// Initialize Socket.IO with CORS
+const io = socketIo(server, {
+  cors: {
+    origin: "*",
+    methods: ["GET", "POST"]
+  }
+});
+
+app.use(cors());
 app.use(bodyParser.json());
 
 // Create uploads directory if it doesn't exist
 const uploadsDir = path.join(process.cwd(), 'uploads');
 if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
+}
+
+// Create streams directory for live streaming
+const streamsDir = path.join(process.cwd(), 'streams');
+if (!fs.existsSync(streamsDir)) {
+  fs.mkdirSync(streamsDir, { recursive: true });
 }
 
 // Configure multer for file uploads
@@ -32,6 +52,30 @@ const upload = multer({
   },
   fileFilter: function (req, file, cb) {
     // Accept only image files
+    if (file.mimetype.startsWith('image/')) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only image files are allowed!'), false);
+    }
+  }
+});
+
+// Configure multer for stream uploads
+const streamStorage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    cb(null, streamsDir);
+  },
+  filename: function (req, file, cb) {
+    cb(null, 'stream-' + Date.now() + '.jpg');
+  }
+});
+
+const streamUpload = multer({ 
+  storage: streamStorage,
+  limits: {
+    fileSize: 5 * 1024 * 1024 // 5MB limit for stream frames
+  },
+  fileFilter: function (req, file, cb) {
     if (file.mimetype.startsWith('image/')) {
       cb(null, true);
     } else {
@@ -74,6 +118,15 @@ const createTablesQuery = `
     description TEXT,
     FOREIGN KEY (customer_id) REFERENCES customers (id)
   );
+
+  CREATE TABLE IF NOT EXISTS streams (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    stream_name TEXT NOT NULL UNIQUE,
+    is_active BOOLEAN DEFAULT 1,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    last_frame_time DATETIME,
+    frame_count INTEGER DEFAULT 0
+  );
 `;
 
 db.exec(createTablesQuery, (err) => {
@@ -82,6 +135,25 @@ db.exec(createTablesQuery, (err) => {
   } else {
     console.log('Tables created successfully.');
   }
+});
+
+// Socket.IO connection handling
+io.on('connection', (socket) => {
+  console.log('Client connected:', socket.id);
+  
+  socket.on('join-stream', (streamName) => {
+    socket.join(streamName);
+    console.log(`Client ${socket.id} joined stream: ${streamName}`);
+  });
+  
+  socket.on('leave-stream', (streamName) => {
+    socket.leave(streamName);
+    console.log(`Client ${socket.id} left stream: ${streamName}`);
+  });
+  
+  socket.on('disconnect', () => {
+    console.log('Client disconnected:', socket.id);
+  });
 });
 
 app.get('/', (req, res) => {
@@ -248,6 +320,144 @@ app.delete('/photos/:id', (req, res) => {
   });
 });
 
+// ===== ESP32-CAM STREAMING ENDPOINTS =====
+
+// Create a new stream
+app.post('/streams', (req, res) => {
+  const { stream_name } = req.body;
+  if (!stream_name) {
+    return res.status(400).json({ message: 'Stream name is required.' });
+  }
+  
+  const query = `INSERT INTO streams (stream_name) VALUES (?)`;
+  db.run(query, [stream_name], function(err) {
+    if (err) {
+      if (err.message.includes('UNIQUE constraint failed')) {
+        return res.status(409).json({ message: 'Stream name already exists.' });
+      }
+      console.error(err);
+      return res.status(500).json({ message: 'Database error', error: err.message });
+    }
+    res.status(201).json({ 
+      message: 'Stream created successfully.',
+      stream: {
+        id: this.lastID,
+        stream_name: stream_name,
+        is_active: true
+      }
+    });
+  });
+});
+
+// Get all streams
+app.get('/streams', (req, res) => {
+  const query = `SELECT * FROM streams ORDER BY created_at DESC`;
+  db.all(query, [], (err, rows) => {
+    if (err) {
+      console.error(err);
+      return res.status(500).json({ message: 'Database error', error: err.message });
+    }
+    res.json({ streams: rows });
+  });
+});
+
+// Upload stream frame from ESP32-CAM
+app.post('/streams/:streamName/frame', streamUpload.single('frame'), (req, res) => {
+  const streamName = req.params.streamName;
+  
+  if (!req.file) {
+    return res.status(400).json({ message: 'No frame uploaded.' });
+  }
+
+  const framePath = req.file.path;
+  const frameBuffer = fs.readFileSync(framePath);
+  const frameBase64 = frameBuffer.toString('base64');
+
+  // Update stream statistics
+  const updateQuery = `UPDATE streams SET last_frame_time = CURRENT_TIMESTAMP, frame_count = frame_count + 1 WHERE stream_name = ?`;
+  db.run(updateQuery, [streamName], function(err) {
+    if (err) {
+      console.error('Database error:', err);
+    }
+  });
+
+  // Broadcast frame to all clients watching this stream
+  io.to(streamName).emit('new-frame', {
+    streamName: streamName,
+    frame: frameBase64,
+    timestamp: new Date().toISOString()
+  });
+
+  // Clean up the temporary file
+  fs.unlinkSync(framePath);
+
+  res.status(200).json({ 
+    message: 'Frame uploaded and broadcasted successfully.',
+    streamName: streamName
+  });
+});
+
+// MJPEG stream endpoint for direct ESP32-CAM streaming
+app.get('/streams/:streamName/mjpeg', (req, res) => {
+  const streamName = req.params.streamName;
+  
+  res.writeHead(200, {
+    'Content-Type': 'multipart/x-mixed-replace; boundary=frame',
+    'Cache-Control': 'no-cache',
+    'Connection': 'close',
+    'Pragma': 'no-cache'
+  });
+
+  const frameHandler = (data) => {
+    if (data.streamName === streamName) {
+      const boundary = '\r\n--frame\r\n';
+      const headers = 'Content-Type: image/jpeg\r\nContent-Length: ' + Buffer.from(data.frame, 'base64').length + '\r\n\r\n';
+      res.write(boundary + headers);
+      res.write(Buffer.from(data.frame, 'base64'));
+    }
+  };
+
+  io.on('new-frame', frameHandler);
+
+  req.on('close', () => {
+    io.off('new-frame', frameHandler);
+  });
+});
+
+// Get stream statistics
+app.get('/streams/:streamName/stats', (req, res) => {
+  const streamName = req.params.streamName;
+  const query = `SELECT * FROM streams WHERE stream_name = ?`;
+  
+  db.get(query, [streamName], (err, row) => {
+    if (err) {
+      console.error(err);
+      return res.status(500).json({ message: 'Database error', error: err.message });
+    }
+    if (!row) {
+      return res.status(404).json({ message: 'Stream not found.' });
+    }
+    res.json({ stream: row });
+  });
+});
+
+// Delete stream
+app.delete('/streams/:streamName', (req, res) => {
+  const streamName = req.params.streamName;
+  const query = `DELETE FROM streams WHERE stream_name = ?`;
+  
+  db.run(query, [streamName], function(err) {
+    if (err) {
+      console.error(err);
+      return res.status(500).json({ message: 'Database error', error: err.message });
+    }
+    if (this.changes === 0) {
+      return res.status(404).json({ message: 'Stream not found.' });
+    }
+    res.json({ message: 'Stream deleted successfully.' });
+  });
+});
+
 // Error handling middleware for multer
 app.use((error, req, res, next) => {
   if (error instanceof multer.MulterError) {
@@ -261,6 +471,6 @@ app.use((error, req, res, next) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
+server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 }); 

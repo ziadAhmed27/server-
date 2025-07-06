@@ -4,7 +4,7 @@
   "description": "Live streaming server for ESP32-CAM with WebSocket and MJPEG support",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
+    "start": "node start.js",
     "dev": "nodemon server.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
